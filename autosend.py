@@ -39,6 +39,7 @@ from pathlib import Path
 from agent import make_draft
 from bandit import REWARDS, Bandit
 from retrieval import ReplyEngine
+from situations import POLICY
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -108,7 +109,7 @@ def sent_today(p: Paths, contact: str, now: datetime) -> int:
 
 
 def gate(p: Paths, cfg: dict, contact: str, arm: str, sim, bandit: Bandit,
-         now: datetime | None = None) -> tuple[bool, str]:
+         situation: str, now: datetime | None = None) -> tuple[bool, str]:
     """The send gate. Returns (allowed, reason)."""
     now = now or now_utc()
     if p.kill.exists():
@@ -121,6 +122,9 @@ def gate(p: Paths, cfg: dict, contact: str, arm: str, sim, bandit: Bandit,
         return False, "daily rate limit reached"
     if arm == "fallback" or sim is None:
         return False, "fallback reply is never auto-sent"
+    pol = POLICY.get(situation, POLICY["chat"])
+    if pol["autosend"] is False:
+        return False, f"situation '{situation}' is human-only ({pol['note']})"
     if sim < cfg["min_similarity"]:
         return False, f"similarity {sim:.2f} < {cfg['min_similarity']}"
     if bandit.n[arm] < cfg["min_n"]:
@@ -142,10 +146,12 @@ def process(p: Paths, contact: str, incoming: str, engine, bandit, style=None,
     cfg = load_config(p)
     # No exploration when real messages are on the line.
     bandit.epsilon = 0.0
-    draft, arm, sim, label = make_draft(engine, bandit, incoming, style)
-    ok, reason = gate(p, cfg, contact, arm, sim, bandit, now)
+    draft, arm, sim, label, situation = make_draft(engine, bandit, incoming,
+                                                  style)
+    ok, reason = gate(p, cfg, contact, arm, sim, bandit, situation, now)
     rec = {"ts": (now or now_utc()).isoformat(), "contact": contact,
            "incoming": incoming, "draft": draft, "arm": arm,
+           "situation": situation,
            "similarity": sim, "label": label,
            "q": None if arm == "fallback" else round(bandit.q[arm], 3)}
     if ok:
@@ -178,6 +184,7 @@ def cmd_review(p: Paths, contact: str):
             keep.append(r)
             continue
         kind = "reject" if a.lower() == "r" else "edit" if a else "approve"
+        bandit.use_situation(r.get("situation", "chat"))
         bandit.update(r["arm"], REWARDS[kind])
         if kind != "reject":
             deliver_to_outbox(p, contact, a or r["draft"])

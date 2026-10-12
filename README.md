@@ -429,6 +429,66 @@ Rules of the loop:
 
 ---
 
+## Situation handling
+
+The bot doesn't treat every message the same — it first recognizes
+**what kind of moment** it's in, then behaves accordingly. A greeting
+gets a light touch; a serious message always goes to you.
+
+### The taxonomy
+
+`situations.py` classifies each incoming message (keyword heuristics,
+stdlib only — no ML model, no pretrained anything):
+
+| Situation | Examples | Policy |
+|---|---|---|
+| `greeting` | "hey", "good morning!" | draft ok, auto-send ok — low risk |
+| `farewell` | "goodnight", "see you" | draft ok, auto-send ok — low risk |
+| `thanks` | "thanks a lot!" | draft ok, auto-send ok — low risk |
+| `question` | "are we still on for lunch?" | draft ok, auto-send only if the gate passes |
+| `plan` | "lets meet tomorrow evening" | draft ok, auto-send only if the gate passes |
+| `chat` | everything else | draft ok, auto-send only if the gate passes |
+| `emotional` | "i'm really sorry…", "urgent, call me" | **human only — never auto-sent** |
+| `unknown` | similarity < 0.25 (nothing like it in history) | **human only — teach it with `learn.py`** |
+
+Priority is deliberate: **safety first** (`emotional` is checked before
+anything else), then **capability** (`unknown` when retrieval finds
+nothing similar), then formulaic → question → plan → generic chat.
+
+### Per-situation learning (the contextual bandit, for real)
+
+The bandit keeps **separate Q-values per situation per contact**
+(`data/bandit/<Contact>.json` → `{"situations": {"greeting": …}}`).
+Old flat state files migrate automatically under `"chat"`.
+
+This is what the "contextual" in contextual bandit was always meant:
+it can learn that *for the same person*, rank1 wins for questions
+while rank0 wins for greetings — independently. Verified: after 30
+rounds of feedback each way, it picks rank1 for questions and rank0
+for greetings without cross-talk.
+
+`agent.py` shows the situation on every draft and flags human-only
+moments:
+
+```
+draft [rank1 (similarity 0.71) + lstm | situation: question]: yeah sure, what time works?
+draft [rank0 (similarity 0.88) | situation: emotional]  ⚠ 'emotional' → human only (serious talk — always human, never auto-sent): ...
+```
+
+### How it plugs into the send gate
+
+`autosend.py`'s gate now takes the situation as input. `emotional` and
+`unknown` are rejected before any confidence math runs — no threshold
+can ever auto-send them. `greeting` / `farewell` / `thanks` skip nothing
+else (whitelist, kill switch, quiet hours, rate limit still apply);
+`question` / `plan` / `chat` go through the full confidence gate.
+
+The day-by-day loop gains a branch: `unknown` situations are exactly
+what `learn.py` is for — you answer once, it's taught, and next time
+the same situation classifies as something the bot *can* handle.
+
+---
+
 ## The plan
 
 | Version | Goal | Deliverables | Status |
@@ -557,6 +617,7 @@ chatmimic/
 ├── parse_instagram.py    ← Stage 1: export → per-contact pairs
 ├── retrieval.py          ← Stage 2: TF-IDF reply suggester (supervised)
 ├── bandit.py             ← Stage 3: epsilon-greedy bandit (reinforcement)
+├── situations.py         ← situation classifier + per-situation policy
 ├── agent.py              ← Stage 4: draft-approval CLI loop (--hybrid for v2)
 ├── train_lstm.py         ← Stage 5 (v2): char-LSTM trainer
 ├── generate.py           ← Stage 5 (v2): hybrid retrieval + LSTM rephrase

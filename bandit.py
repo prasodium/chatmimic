@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Contextual bandit -- the 'reinforcement' in v1.
+Contextual bandit -- the 'reinforcement' in the system.
 
 Arms = which candidate to send: rank0 / rank1 / rank2 (the top TF-IDF
 candidates) or the generic fallback. Reward comes from YOUR feedback
@@ -10,10 +10,14 @@ in the draft loop:
     edit then send -> +0.4
     reject         -> -1.0
 
-Epsilon-greedy with incremental-average Q updates. State persists per
-contact in JSON, so learning survives restarts. This is genuine
-reinforcement learning -- just the lightweight (bandit) kind instead
-of deep RL.
+Epsilon-greedy with incremental-average Q updates. Q-values are kept
+PER SITUATION per contact (see situations.py) -- that is what makes it
+a *contextual* bandit: it can learn that rank1 wins for questions while
+rank0 wins for greetings, for the same person, separately.
+
+State persists per contact in JSON, so learning survives restarts.
+Old flat state files ({"q": ..., "n": ...}) migrate automatically
+under the "chat" situation.
 """
 
 import json
@@ -22,6 +26,11 @@ from pathlib import Path
 
 ARMS = ["rank0", "rank1", "rank2", "fallback"]
 REWARDS = {"approve": 1.0, "edit": 0.4, "reject": -1.0}
+DEFAULT_SITUATION = "chat"
+
+
+def _blank():
+    return {"q": {a: 0.0 for a in ARMS}, "n": {a: 0 for a in ARMS}}
 
 
 class Bandit:
@@ -30,12 +39,29 @@ class Bandit:
         self.state_path = Path(state_path)
         self.epsilon = epsilon
         self.rng = random.Random(seed)
-        self.q = {a: 0.0 for a in ARMS}
-        self.n = {a: 0 for a in ARMS}
+        self.situations: dict = {}
         if self.state_path.exists():
             s = json.loads(self.state_path.read_text(encoding="utf-8"))
-            self.q.update(s.get("q", {}))
-            self.n.update(s.get("n", {}))
+            if "situations" in s:
+                self.situations = s["situations"]
+            else:
+                # old flat format -> migrate under "chat"
+                self.situations = {DEFAULT_SITUATION: {
+                    "q": {a: float(s.get("q", {}).get(a, 0.0)) for a in ARMS},
+                    "n": {a: int(s.get("n", {}).get(a, 0)) for a in ARMS},
+                }}
+        self.use_situation(DEFAULT_SITUATION)
+
+    def use_situation(self, situation: str):
+        """Point q/n at this situation's tables. Call before select/update
+        (make_draft does this automatically after classifying)."""
+        self.situation = situation
+        tbl = self.situations.setdefault(situation, _blank())
+        for a in ARMS:  # forward-compat: fill any missing arms
+            tbl["q"].setdefault(a, 0.0)
+            tbl["n"].setdefault(a, 0)
+        self.q = tbl["q"]
+        self.n = tbl["n"]
 
     def select(self, n_candidates: int) -> str:
         """Pick an arm. n_candidates = how many retrieval candidates exist."""
@@ -53,7 +79,10 @@ class Bandit:
     def save(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(
-            json.dumps({"q": self.q, "n": self.n}, indent=1), encoding="utf-8")
+            json.dumps({"situations": self.situations}, indent=1),
+            encoding="utf-8")
 
     def summary(self):
-        return {a: {"q": round(self.q[a], 3), "n": self.n[a]} for a in ARMS}
+        return {s: {a: {"q": round(t["q"][a], 3), "n": t["n"][a]}
+                    for a in ARMS}
+                for s, t in self.situations.items()}

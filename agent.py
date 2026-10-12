@@ -19,21 +19,27 @@ from pathlib import Path
 
 from bandit import REWARDS, Bandit
 from retrieval import ReplyEngine
+from situations import POLICY, classify, human_only
 
 ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "feedback_log.jsonl"
 
 
 def make_draft(engine, bandit, incoming, style=None):
-    """Retrieve -> bandit picks -> (optional) LSTM rephrase.
+    """Retrieve -> classify situation -> bandit (per-situation) picks ->
+    (optional) LSTM rephrase.
 
-    Returns (draft, arm, similarity, label). similarity is None for the
-    fallback arm. `style` is a generate.StyleModel or None (v1 behaviour).
+    Returns (draft, arm, similarity, label, situation). similarity is None
+    for the fallback arm. `style` is a generate.StyleModel or None.
     """
     cands = engine.suggest(incoming, k=3)
+    sim = cands[0][1] if cands else None
+    situation = classify(incoming, sim)
+    bandit.use_situation(situation)
     arm = bandit.select(len(cands))
     if arm == "fallback":
-        return engine.fallback, arm, None, "fallback (your most common reply)"
+        return (engine.fallback, arm, None,
+                "fallback (your most common reply)", situation)
     draft, score, _ = cands[int(arm[4:])]
     label = f"{arm} (similarity {score:.2f})"
     if style is not None:
@@ -41,7 +47,7 @@ def make_draft(engine, bandit, incoming, style=None):
         new = rephrase(style, draft)
         if new != draft:
             draft, label = new, label + " + lstm"
-    return draft, arm, score, label
+    return draft, arm, sim, label, situation
 
 
 def main():
@@ -84,9 +90,14 @@ def main():
         if not incoming:
             continue
 
-        draft, arm, _, src = make_draft(engine, bandit, incoming, style)
+        draft, arm, _, src, situation = make_draft(engine, bandit,
+                                                       incoming, style)
 
-        print(f"\ndraft [{src}]: {draft}")
+        flag = ""
+        if human_only(situation):
+            flag = (f"  ⚠ '{situation}' → human only "
+                    f"({POLICY[situation]['note']})")
+        print(f"\ndraft [{src} | situation: {situation}]{flag}: {draft}")
         try:
             action = input("you> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -108,13 +119,15 @@ def main():
                 "contact": args.contact,
                 "incoming": incoming,
                 "arm": arm,
+                "situation": situation,
                 "draft": draft,
                 "decision": kind,
                 "final": final,
                 "reward": reward,
             }, ensure_ascii=False) + "\n")
         qs = ", ".join(f"{a}={bandit.q[a]:+.2f}" for a in bandit.q)
-        print(f"  -> {kind} (reward {reward:+.1f})   bandit: {qs}\n")
+        print(f"  -> {kind} (reward {reward:+.1f})"
+              f"   bandit[{situation}]: {qs}\n")
 
 
 if __name__ == "__main__":
