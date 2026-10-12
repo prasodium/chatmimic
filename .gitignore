@@ -1,0 +1,17 @@
+# === PRIVATE: never commit these ===
+# Your chat data, trained state, and logs stay on YOUR machine only.
+data/
+models/
+feedback_log.jsonl
+*.jsonl
+
+# Raw Instagram exports (if you ever unzip one inside the repo)
+*instagram*.zip
+messages/
+
+# === Python hygiene ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
