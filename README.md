@@ -380,6 +380,55 @@ earned the right to speak without you.
 
 ---
 
+## The day-by-day loop
+
+This is the operating loop the whole system is built around: the bot
+messages on your behalf where it can, hands the rest to you, and learns
+from every answer you give — improving day by day.
+
+```
+ DAY N
+  │
+  ├─ bot knows the situation ──► draft (v1/v2) or auto-send (v3, gated)
+  │                                     │
+  │                                     ▼
+  │                               you approve / edit / reject
+  │                               → bandit learns WHICH reply to pick
+  │
+  └─ bot CAN'T handle it ──► goes to you (draft / review queue), never guessed
+                                      │
+                                      ▼
+                              YOU answer it yourself
+                                      │
+                                      ▼
+                    python learn.py --contact "Aarav Sharma"
+                    → new pair appended to data/pairs/Aarav Sharma.json
+                                      │
+ DAY N+1                              ▼
+  └─ same situation again ──► retrieval FINDS your taught reply
+                              → bandit ranks it from fresh feedback
+                              → (nightly, v2) train_lstm.py refolds it
+                                 into the style model
+```
+
+Two learning channels, compounding daily:
+
+| Channel | What it learns | Trigger | Needs retraining? |
+|---|---|---|---|
+| Bandit (RL) | *which* candidate reply to pick, per person | every approve / edit / reject | no — live instantly |
+| Taught pairs (supervised) | *new* replies for novel situations | every `learn.py` | no for retrieval — the index rebuilds from `data/pairs/` on every startup; yes for the LSTM — re-run `train_lstm.py` (e.g. nightly) |
+
+Rules of the loop:
+
+- The bot never guesses what it can't handle — low confidence always
+  goes to you (draft mode / review queue), never auto-sent.
+- Every manual answer you give is one `learn.py` call away from becoming
+  permanent knowledge. Nothing you teach is ever lost.
+- Nothing degrades: old pairs stay, Q-values persist in `data/bandit/`,
+  weights in `models/`. The system only accumulates.
+
+---
+
 ## The plan
 
 | Version | Goal | Deliverables | Status |
@@ -512,6 +561,7 @@ chatmimic/
 ├── train_lstm.py         ← Stage 5 (v2): char-LSTM trainer
 ├── generate.py           ← Stage 5 (v2): hybrid retrieval + LSTM rephrase
 ├── autosend.py           ← Stage 6 (v3): gated auto-send, kill switch, review
+├── learn.py              ← the day-by-day loop: teach it your manual answers
 ├── check_privacy.py      ← pre-push privacy guard
 ├── simulate.py           ← end-to-end verification on synthetic data
 ├── data/                 ← YOURS ONLY, gitignored (pairs, bandit state)
