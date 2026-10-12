@@ -130,17 +130,6 @@ Everything in this repo follows the owner's standing requirements.
  └────────────────────────────────────────────────────────┘
 ```
 
-**v4 (optional, breaks a ground rule — clearly marked):**
-
-```
- ┌─ STAGE 7 (OPTIONAL): Qwen + LoRA ─────────────────────┐
- │ Only if v2's understanding ever feels too shallow.    │
- │ Small Qwen + LoRA fine-tune on your pairs. Needs GPU, │
- │ starts from PRETRAINED weights — kept out of the core │
- │ plan on purpose.                                       │
- └────────────────────────────────────────────────────────┘
-```
-
 ---
 
 ## The plan
@@ -150,7 +139,6 @@ Everything in this repo follows the owner's standing requirements.
 | **v1** | Prove the loop: your chats → drafts that sound like you → RL from your feedback | `parse_instagram.py`, `retrieval.py`, `bandit.py`, `agent.py`, `simulate.py`, `check_privacy.py` | ✅ done & verified |
 | **v2** | Add the LSTM style layer; hybrid retrieval+LSTM generation | `train_lstm.py`, `generate.py`, per-contact `models/*.pt` | ✅ built (`agent.py --hybrid`) |
 | **v3** | Careful auto-send for whitelisted contacts | `autosend.py`: send gate, whitelist, kill switch, send log, review queue | ✅ built |
-| **v4** | (Optional) Qwen+LoRA if v2 understanding plateaus | LoRA fine-tune script | only if needed |
 
 `simulate.py` is the standing regression test: synthetic corpus →
 retrieval sanity checks → 300 simulated feedback rounds proving the
@@ -185,8 +173,8 @@ say; the other teaches it your taste over time.
 **Why not Qwen / Hugging Face models?**
 Three violations of the ground rules: they're pretrained (your rule is
 own-weights-only), they're heavy (~1GB+, GPU to fine-tune), and out of
-the box they reply like a generic assistant — not like you. Kept as an
-explicitly-marked optional v4, not the core plan.
+the box they reply like a generic assistant — not like you. Rejected
+outright: no pretrained weights in this project, period.
 
 ---
 
