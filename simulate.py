@@ -98,7 +98,7 @@ def test_autosend(engine):
         outbox = lambda *_: None
         run = lambda now=noon: A.process(
             p, "demo", "want to grab lunch tomorrow?", engine, bandit, send=outbox, now=now)
-        trained = lambda: [bandit.update("rank0", 1.0) for _ in range(12)]
+        trained = lambda: [bandit.update("rank0", 1.0) for _ in range(A.DEFAULTS["min_n"])]
 
         assert run() == "queued", "must be draft-only before opt-in"
         A.save_config(p, {**A.DEFAULTS, "contacts": ["demo"]})

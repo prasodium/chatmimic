@@ -47,7 +47,7 @@ DEFAULTS = {
     "contacts": [],            # whitelist; empty = draft-only everywhere
     "min_similarity": 0.60,
     "min_q": 0.50,
-    "min_n": 10,
+    "min_n": 20,
     "max_per_day": 20,
     "quiet_hours": [23, 7],    # local time; no auto-send from 23:00 to 07:00
 }
@@ -146,7 +146,8 @@ def process(p: Paths, contact: str, incoming: str, engine, bandit, style=None,
     ok, reason = gate(p, cfg, contact, arm, sim, bandit, now)
     rec = {"ts": (now or now_utc()).isoformat(), "contact": contact,
            "incoming": incoming, "draft": draft, "arm": arm,
-           "similarity": sim, "label": label}
+           "similarity": sim, "label": label,
+           "q": None if arm == "fallback" else round(bandit.q[arm], 3)}
     if ok:
         send(p, contact, draft)
         append(p.send_log, rec)
@@ -222,6 +223,9 @@ def main():
         print(f"thresholds  : sim>={cfg['min_similarity']} Q>={cfg['min_q']} "
               f"n>={cfg['min_n']} max/day={cfg['max_per_day']} "
               f"quiet={cfg['quiet_hours']}")
+        now = now_utc()
+        today = {c: sent_today(p, c, now) for c in cfg["contacts"]}
+        print(f"sent today  : {today or 'none'} (cap {cfg['max_per_day']}/contact)")
         print(f"sent total  : {len(read_jsonl(p.send_log))}   "
               f"awaiting review: {len(read_jsonl(p.queue))}")
     elif args.cmd == "review":

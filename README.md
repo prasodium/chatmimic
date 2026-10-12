@@ -5,7 +5,7 @@ chatting pattern and drafts replies **in your voice, to specific people** —
 then keeps learning from your feedback.
 
 No API keys. No pretrained models. No dependencies beyond the Python
-standard library (v1). Your chats never leave your machine.
+standard library (v1, v3) plus CPU PyTorch for the optional v2 style model. Your chats never leave your machine.
 
 ---
 
@@ -287,7 +287,7 @@ fall back to a generic `_all` model trained on your replies everywhere.
 
 ```
 chars (~100 vocab) → embedding(64) → LSTM(256) ×2 → linear → softmax
-≈ 1.5M parameters ≈ a few MB on disk
+≈ 0.9M parameters ≈ 4 MB on disk
 ```
 
 **Training:** next-character prediction (supervised cross-entropy),
@@ -301,7 +301,8 @@ the LSTM rephrases **HOW** you say it:
 1. retrieval → top candidate reply, e.g. "yeah sure, what time?"
 2. keep its first words as a seed prefix: "yeah sure,"
 3. LSTM continues the seed with temperature sampling → "yeah sure, what time works?"
-4. meaning check: word overlap between candidate and generation ≥ threshold?
+4. meaning check: ≥75% of the candidate's words kept AND no invented
+   words (every word must be one you've really written)?
    yes → use the rephrased version (your content, your style)
    no  → keep the original candidate (the LSTM may polish, never derail)
 ```
@@ -503,7 +504,7 @@ chatmimic/
 ├── README.md            ← you are here (full plan + pipeline)
 ├── LICENSE              ← MIT
 ├── .gitignore            ← data/, models/, logs can never be committed
-├── requirements.txt      ← v1: stdlib only, nothing to install
+├── requirements.txt      ← v1/v3 stdlib only; torch for v2
 ├── parse_instagram.py    ← Stage 1: export → per-contact pairs
 ├── retrieval.py          ← Stage 2: TF-IDF reply suggester (supervised)
 ├── bandit.py             ← Stage 3: epsilon-greedy bandit (reinforcement)
@@ -537,4 +538,5 @@ chatmimic/
 - The LSTM learns *style*, not deep meaning. That's why it's paired
   with retrieval (retrieval = what to say, LSTM = how you say it).
 - Needs history: low-data contacts fall back to your generic style model.
-- v1 is draft-only by design: nothing is ever sent anywhere.
+- Draft-only by default: nothing is sent unless you opt a contact in to
+  v3, and even then it only reaches `data/outbox.jsonl`, never the network.

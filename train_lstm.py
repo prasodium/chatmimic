@@ -16,6 +16,7 @@ which is trained on your replies across every contact.
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 
 import torch
@@ -23,6 +24,7 @@ import torch.nn as nn
 
 ROOT = Path(__file__).resolve().parent
 BOS, EOS = "\x02", "\x03"  # message start / end markers
+WORD_RE = re.compile(r"[a-z0-9']+")
 
 
 class CharLSTM(nn.Module):
@@ -114,7 +116,8 @@ def train_model(texts: list[str], epochs: int = 30, batch_size: int = 32,
             print(f"  epoch {ep:3d}  train {tr:.3f}  val {va:.3f}")
     model.load_state_dict(best_state)
     return {"cfg": model.cfg, "vocab": vocab, "state": model.state_dict(),
-            "val_loss": best, "n_msgs": len(texts)}
+            "val_loss": best, "n_msgs": len(texts),
+            "words": sorted({w for x in texts for w in WORD_RE.findall(x.lower())})}
 
 
 def main():

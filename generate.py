@@ -13,12 +13,11 @@ so the LSTM can polish but never derail a draft.
 """
 
 import argparse
-import re
 from pathlib import Path
 
 import torch
 
-from train_lstm import BOS, EOS, CharLSTM
+from train_lstm import BOS, EOS, WORD_RE, CharLSTM
 
 ROOT = Path(__file__).resolve().parent
 
@@ -31,6 +30,8 @@ class StyleModel:
         self.model = CharLSTM(**ckpt["cfg"])
         self.model.load_state_dict(ckpt["state"])
         self.model.eval()
+        # words you have actually written; None for checkpoints without it
+        self.words = set(ckpt["words"]) if "words" in ckpt else None
 
     @classmethod
     def for_contact(cls, contact: str, models_dir: str | Path = ROOT / "models"):
@@ -70,18 +71,20 @@ class StyleModel:
 
 
 def _words(s: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9']+", s.lower()))
+    return set(WORD_RE.findall(s.lower()))
 
 
 def rephrase(style: StyleModel, retrieved: str, temperature: float = 0.7,
              tries: int = 8, keep_frac: float = 0.4,
-             min_overlap: float = 0.5, seed: int | None = None) -> str:
+             min_overlap: float = 0.75, seed: int | None = None) -> str:
     """Rephrase a retrieved reply in your char-level style, or return it
     unchanged if no sample stays faithful to its meaning."""
     if len(retrieved) < 6:
         return retrieved
     rng = torch.Generator().manual_seed(seed) if seed is not None else None
-    prefix = retrieved[:max(3, int(len(retrieved) * keep_frac))]
+    # seed = the first ~40% of the reply, cut on a word boundary
+    cut = retrieved.rfind(" ", 0, max(1, int(len(retrieved) * keep_frac)) + 1)
+    prefix = retrieved[:cut] if cut > 0 else retrieved.split(" ")[0]
     want = _words(retrieved)
     best, best_score = None, -1e9
     for _ in range(tries):
@@ -90,6 +93,9 @@ def rephrase(style: StyleModel, retrieved: str, temperature: float = 0.7,
             continue
         got = _words(cand)
         if not want or len(want & got) / len(want) < min_overlap:
+            continue
+        # no invented words: every word must be one you have really used
+        if style.words is not None and not got <= style.words:
             continue
         score = style.avg_logprob(cand)
         if score > best_score:
