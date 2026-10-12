@@ -51,84 +51,331 @@ Everything in this repo follows the owner's standing requirements.
 
 ## The full pipeline
 
-```
- ┌─ STAGE 0 ──────────────────────────────────────────────┐
- │ Instagram → Download Your Information (JSON) → unzip   │
- │ LOCALLY. Nothing leaves your machine. Ever.            │
- └────────────────────────┬───────────────────────────────┘
-                          │  parse_instagram.py
- ┌─ STAGE 1: PARSE ────────▼───────────────────────────────┐
- │ messages/inbox/<thread>/message_*.json                  │
- │  • keep 1-on-1 threads only (groups skipped in v1)      │
- │  • chronological sort, UTF-8 mojibake repair            │
- │  • text messages only (photos/shares/reactions skipped) │
- │  • pair: their consecutive msgs → your consecutive reply│
- └────────────────────────┬───────────────────────────────┘
-                          ▼
-              data/pairs/<Contact>.json        ← gitignored
-              [{"incoming": ..., "reply": ..., "ts": ...}]
-                          │
-        ┌─────────────────┴──────────────────┐
-        │  STAGE 2: SUPERVISED (your voice)   │
-        │  retrieval.py — per-contact TF-IDF  │
-        │  index over THEIR past messages.    │
-        │  New incoming → most similar past   │
-        │  incomings → YOUR historical replies│
-        │  as candidates (top-k + fallback).  │
-        │  Zero dependencies, pure stdlib.    │
-        └─────────────────┬──────────────────┘
-                          │ candidates
-        ┌─────────────────▼──────────────────┐
-        │  STAGE 3: REINFORCEMENT (judgment)  │
-        │  bandit.py — contextual bandit.     │
-        │  Arms: rank0 / rank1 / rank2 /       │
-        │  fallback. Epsilon-greedy pick,     │
-        │  incremental Q-updates.             │
-        │  State: data/bandit/<Contact>.json  │
-        └─────────────────┬──────────────────┘
-                          │ draft
- ┌─ STAGE 4: DRAFT LOOP ──▼───────────────────────────────┐
- │ agent.py — interactive CLI:                            │
- │   them> <paste incoming message>                       │
- │   draft [rank1, sim 0.87]: yeah sure, what time?        │
- │   you>  <Enter>=approve  <type edit>  r=reject  q=quit │
- │ Reward: approve +1.0 · edit +0.4 · reject −1.0         │
- │ Every decision → bandit.update + feedback_log.jsonl    │
- │ → the NEXT draft for this person is smarter.           │
- └────────────────────────────────────────────────────────┘
-```
-
-**v2 adds:**
+### System overview
 
 ```
- ┌─ STAGE 5: STYLE MODEL (v2) ────────────────────────────┐
- │ train_lstm.py — char-level LSTM, PyTorch, CPU-only.    │
- │  • vocab ≈ 100 chars → tiny (1–2M params, a few MB)    │
- │  • arch: char-embed(64) → 2×LSTM(256) → linear →       │
- │    softmax. Next-char prediction on YOUR messages.     │
- │  • trains in minutes on CPU; no tokenizer needed —     │
- │    slang, typos and emoji habits come free.            │
- │  • (GRU is an accepted leaner swap: fewer params,      │
- │    similar quality.)                                   │
- │ HYBRID INFERENCE: retrieval picks WHAT to say,         │
- │ the LSTM rephrases HOW you say it (seeded generation,  │
- │ temperature sampling).                                 │
- │ Weights → models/  ← gitignored, never published.      │
- └────────────────────────────────────────────────────────┘
+ STAGE 0                    STAGE 1                    STAGE 2 + 3 + 4
+ Instagram export   ──►   parse_instagram.py    ──►   retrieval (voice)
+ (your machine)          (their msg → your            + bandit (judgment)
+                          reply pairs)                + draft loop
+                                                          │
+                        ┌─────────────────────────────────┘
+                        ▼
+                  ┌─────────────┐
+                  │  STAGE 5    │  v2: char-LSTM style model
+                  │  (train +   │  (hybrid: retrieval picks WHAT,
+                  │   generate) │   LSTM rephrases HOW)
+                  └──────┬──────┘
+                         ▼
+                  ┌─────────────┐
+                  │  STAGE 6    │  v3: gated auto-send
+                  │  (autosend) │  (whitelist + confidence gate +
+                  └─────────────┘   kill switch + review queue)
 ```
 
-**v3 adds:**
+Data never leaves your machine at any stage. Everything below runs
+offline after setup.
+
+---
+
+### Stage 0 — Data acquisition
+
+1. Instagram app → profile → **Settings** → **Accounts Centre** →
+   **Your information and permissions** → **Download your information**.
+2. Choose **JSON** format, all-time date range, and tick **Messages**.
+3. Instagram emails you a zip. **Unzip it outside the repo**
+   (e.g. `~/Downloads/ig`) — the raw export must never sit inside
+   the project folder.
+
+Resulting layout:
 
 ```
- ┌─ STAGE 6: GATED AUTO-SEND (v3) ────────────────────────┐
- │  • per-contact opt-in whitelist (default: draft-only)  │
- │  • send gate: bandit Q + retrieval similarity must     │
- │    clear a confidence threshold, else back to drafts   │
- │  • kill-switch file, quiet hours, per-day rate limit   │
- │  • every sent message appended to a local send log     │
- │  • low-confidence → human review queue, never auto     │
- └────────────────────────────────────────────────────────┘
+<export>/
+└── messages/
+    └── inbox/
+        ├── Aarav_Sharma/
+        │   ├── message_1.json
+        │   └── message_2.json
+        └── ...
 ```
+
+Each `message_N.json` looks like this:
+
+```json
+{
+  "participants": [{"name": "Aarav Sharma"}, {"name": "Your Name"}],
+  "messages": [
+    {"sender_name": "Aarav Sharma", "timestamp_ms": 1728212345000,
+     "content": "want to grab lunch tomorrow?"},
+    {"sender_name": "Your Name", "timestamp_ms": 1728212400000,
+     "content": "yeah sure, what time?"}
+  ],
+  "title": "Aarav Sharma"
+}
+```
+
+---
+
+### Stage 1 — Parsing: export → per-contact pairs
+
+`parse_instagram.py /path/to/export --me "Your Name" --out data/pairs`
+
+Step by step, per thread folder:
+
+1. Read `message_1.json … message_N.json`, merge, sort by `timestamp_ms`.
+2. **1-on-1 filter:** threads whose `participants` list ≠ 2 names are
+   skipped (group chats stay out of v1).
+3. **Identity:** `--me` tells the parser which sender is you; without
+   it, the folder name (usually the *other* person) is used to infer it.
+4. **Text repair:** Instagram sometimes stores UTF-8 as latin-1
+   (`"cafÃ©"` instead of `"café"`) — every string is repaired.
+5. **Text-only filter:** messages with no `content` (photos, videos,
+   shares, reactions) are skipped.
+6. **Pairing:** walk chronologically; consecutive messages from the same
+   sender are joined with newlines. When *they* speak then *you* reply,
+   one training pair is emitted:
+
+```
+them:  "want to grab lunch tomorrow?"
+them:  "there's a new place near campus"
+you:   "yeah sure"
+you:   "what time?"
+        ──►  pair: incoming="want to grab lunch tomorrow?\nthere's a new
+              place near campus", reply="yeah sure\nwhat time?"
+```
+
+7. **Quality floor:** contacts with fewer than `--min-pairs` (default 20)
+   pairs are skipped — too little history to learn from.
+
+Output schema — `data/pairs/<Contact>.json` (gitignored):
+
+```json
+[
+  {"incoming": "want to grab lunch tomorrow?", "reply": "yeah sure, what time?", "ts": 1728212400000},
+  {"incoming": "did you watch the match?",     "reply": "that last over was insane", "ts": 1728216000000}
+]
+```
+
+---
+
+### Stage 2 — Supervised base: retrieval (your voice)
+
+`retrieval.py` — per-contact TF-IDF index, pure standard library.
+
+**Index build** (once per contact, at startup):
+
+1. Tokenize every past *incoming* message: lowercase, keep `[a-z0-9']`.
+2. Term frequency (TF): count of each token ÷ message length.
+3. Inverse document frequency (IDF): `log((1 + N) / (1 + df)) + 1`,
+   where `N` = number of messages, `df` = messages containing the token.
+   Rare, distinctive words ("lunch") weigh more than common ones ("the").
+4. Each message becomes a TF×IDF vector, L2-normalized.
+
+**Query** (per incoming message):
+
+1. Tokenize the new message the same way, weight by the same IDFs.
+2. Cosine similarity against every indexed message: O(N) dot products —
+   trivial for thousands of pairs, no GPU, no embeddings model.
+3. Return top-k `(your_reply, similarity, pair_index)`, best first.
+
+Worked example — contact's history contains
+`"want to grab lunch tomorrow?" → "yeah sure, what time?"`.
+New incoming: `"lunch tomorrow?"`. Shared distinctive tokens
+(`lunch`, `tomorrow`) dominate the dot product → similarity ≈ 0.9 →
+candidate reply: `"yeah sure, what time?"`.
+
+**Fallback:** if nothing scores above zero (a topic you never discussed),
+the engine returns your most common reply to that contact
+(e.g. `"haha"`), flagged as the `fallback` arm so the bandit and the
+send gate treat it with suspicion.
+
+---
+
+### Stage 3 — Reinforcement: the bandit (your judgment)
+
+`bandit.py` — a contextual bandit. This is genuine reinforcement
+learning, the lightweight (bandit, not deep-RL) kind.
+
+**Arms** (the actions it chooses between):
+
+| Arm | Meaning |
+|---|---|
+| `rank0` / `rank1` / `rank2` | send the 1st / 2nd / 3rd retrieval candidate |
+| `fallback` | send your generic most-common reply |
+
+**Selection — epsilon-greedy** (`epsilon = 0.15`):
+
+```
+with probability 0.15:  pick a random valid arm      # explore
+otherwise:              pick the arm with highest Q  # exploit
+```
+
+Exploration never fully stops, so it can discover that your taste
+changed.
+
+**Update — incremental mean.** After your feedback gives reward `r`
+for arm `a` (seen `n` times before):
+
+```
+n(a) ← n(a) + 1
+Q(a) ← Q(a) + (r − Q(a)) / n(a)
+```
+
+Worked numbers: `Q(rank1) = 0.20` after 4 rounds, you approve (`r = +1.0`)
+→ `Q = 0.20 + (1.0 − 0.20)/5 = 0.36`. One approval visibly moves the
+needle; dozens of rounds converge it.
+
+**Rewards** (from your decision in the draft loop):
+
+| Your decision | Reward | Meaning |
+|---|---|---|
+| approve as-is (Enter) | **+1.0** | perfect draft |
+| edit then send | **+0.4** | right idea, wrong wording |
+| reject (`r`) | **−1.0** | wrong draft |
+
+**State** — `data/bandit/<Contact>.json` (gitignored, survives restarts):
+
+```json
+{"q": {"rank0": -0.42, "rank1": 0.81, "rank2": -0.10, "fallback": -1.0},
+ "n": {"rank0": 31, "rank1": 58, "rank2": 12, "fallback": 4}}
+```
+
+Reading it: *for this contact, the 2nd retrieval candidate is usually
+the keeper* — that is the learned, per-person judgment no static model
+has.
+
+---
+
+### Stage 4 — Draft loop: where the learning happens
+
+`python agent.py --contact "Aarav Sharma"` — the interactive CLI.
+
+Sequence per message:
+
+```
+1. you paste          them> are we still on for lunch?
+2. engine suggests    candidates = [("yep, see you at 1", 0.91),
+                                    ("yeah sure, what time?", 0.62),
+                                    ("haha ok", 0.31)]
+3. bandit selects     arm = rank0   (Q(rank0) highest; 15% explore)
+4. draft shown        draft [rank0, sim 0.91]: yep, see you at 1
+5. you decide         you> [Enter]               → approve
+6. reward + update    bandit.update("rank0", +1.0) → Q rises
+7. logged             feedback_log.jsonl += {ts, contact, incoming,
+                                             arm, draft, decision, reward}
+8. repeat             → the NEXT draft for this person is smarter
+```
+
+`feedback_log.jsonl` (gitignored) is the audit trail of everything the
+bandit ever learned from — one JSON object per line, forever replayable.
+
+Nothing is sent anywhere in v1/v2. The loop is the product: your taste,
+distilled per person, one decision at a time.
+
+---
+
+### Stage 5 — Style model (v2): char-level LSTM
+
+`train_lstm.py` — trains **only on your replies**, from scratch.
+
+**Data prep:** your replies from `data/pairs/` → one long char stream,
+each message wrapped in `BOS … EOS` markers (`\x02`, `\x03`) so the
+model learns where messages start and end. Contacts with thin history
+fall back to a generic `_all` model trained on your replies everywhere.
+
+**Architecture** (tiny on purpose):
+
+```
+chars (~100 vocab) → embedding(64) → LSTM(256) ×2 → linear → softmax
+≈ 1.5M parameters ≈ a few MB on disk
+```
+
+**Training:** next-character prediction (supervised cross-entropy),
+Adam optimizer, minibatches of message chunks, ~10–30 minutes on CPU.
+No tokenizer — slang, typos, and emoji habits are just characters to it.
+
+**Hybrid inference** (`generate.py`) — retrieval picks **WHAT** to say,
+the LSTM rephrases **HOW** you say it:
+
+```
+1. retrieval → top candidate reply, e.g. "yeah sure, what time?"
+2. keep its first words as a seed prefix: "yeah sure,"
+3. LSTM continues the seed with temperature sampling → "yeah sure, what time works?"
+4. meaning check: word overlap between candidate and generation ≥ threshold?
+   yes → use the rephrased version (your content, your style)
+   no  → keep the original candidate (the LSTM may polish, never derail)
+```
+
+Weights → `models/<Contact>.pt` (gitignored, never published).
+`agent.py --hybrid` wires it into the draft loop; the bandit's arms and
+rewards work unchanged — the RL layer doesn't care where the wording
+came from.
+
+---
+
+### Stage 6 — Gated auto-send (v3)
+
+`autosend.py` — default is **draft-only**. Nothing is automatic until you
+opt a contact in: `autosend.py enable "Aarav Sharma"`.
+
+**The send gate** — a message is auto-sent only if ALL hold:
+
+```
+contact on whitelist?
+  └─ no → draft mode (as before)
+kill switch off?  (`autosend.py kill` stops EVERYTHING instantly)
+outside quiet hours?
+under the per-day rate limit for this contact?
+chosen arm is rank0/1/2 (never the generic fallback)?
+retrieval similarity ≥ min_similarity?
+bandit Q(arm) ≥ min_q  AND  n(arm) ≥ min_n feedback rounds?
+  └─ ALL YES → send (epsilon forced to 0: no exploration on auto-sends)
+  └─ ANY NO  → data/review_queue.jsonl  (human review, never sent)
+```
+
+**Mechanics:**
+
+- `autosend.py status` — whitelist, kill-switch state, today's send counts.
+- `autosend.py review --contact …` — walk the review queue, approve/edit/
+  reject each item (every decision still feeds the bandit).
+- Every sent message is appended to a local send log: timestamp, contact,
+  incoming, sent text, arm, similarity, Q — full accountability.
+- Thresholds (`min_similarity`, `min_q`, `min_n`, quiet hours, daily cap)
+  live in one config block at the top of `autosend.py` — tune them as the
+  bandit matures. Start strict; loosen only with evidence.
+
+---
+
+### End-to-end worked example
+
+One message traveling the whole system, contact "Aarav Sharma":
+
+```
+① incoming:            "are we still on for lunch tomorrow?"
+
+② retrieval:           top candidates —
+   rank0 (0.93): "yep, see you at 1"
+   rank1 (0.71): "yeah sure, what time?"
+   rank2 (0.44): "haha ok"
+
+③ bandit:              Q = {rank0: 0.12, rank1: 0.81, rank2: -0.2}
+   epsilon roll → exploit → arm = rank1
+   (you've taught it: for Aarav, the 2nd candidate lands better)
+
+④ v2 hybrid (optional): seed "yeah sure," → LSTM → "yeah sure, what time works?"
+   meaning check passes → draft = "yeah sure, what time works?"
+
+⑤ draft loop:          draft [rank1, sim 0.71]: yeah sure, what time works?
+   you> [Enter] → approve → reward +1.0 → Q(rank1) rises again
+
+⑥ v3 gate (if enabled): whitelisted? yes · sim 0.71 ≥ 0.6? yes ·
+   Q(rank1)=0.83 ≥ 0.5? yes · n=59 ≥ 20? yes → auto-send.
+   Otherwise → review queue, you decide.
+```
+
+That is the whole machine: your history teaches it your voice,
+your feedback teaches it your judgment, and the gate decides when it's
+earned the right to speak without you.
 
 ---
 
