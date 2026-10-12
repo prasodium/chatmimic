@@ -25,18 +25,26 @@ ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "feedback_log.jsonl"
 
 
-def make_draft(engine, bandit, incoming, style=None):
+def make_draft(engine, bandit, incoming, style=None, gen=None):
     """Retrieve -> classify situation -> bandit (per-situation) picks ->
     (optional) LSTM rephrase.
 
+    If gen (a seq2seq.Seq2SeqModel) is given, a brand-new generated reply
+    competes as the "gen" arm -- the bandit learns per situation whether
+    you prefer generated or retrieved replies.
+
     Returns (draft, arm, similarity, label, situation). similarity is None
-    for the fallback arm. `style` is a generate.StyleModel or None.
+    for the fallback and gen arms. `style` is a generate.StyleModel or None.
     """
     cands = engine.suggest(incoming, k=3)
     sim = cands[0][1] if cands else None
     situation = classify(incoming, sim)
     bandit.use_situation(situation)
-    arm = bandit.select(len(cands))
+    gen_text = gen.generate(incoming) if gen is not None else None
+    arm = bandit.select(len(cands), has_gen=gen_text is not None)
+    if arm == "gen":
+        return (gen_text, arm, None,
+                "gen (newly generated in your style)", situation)
     if arm == "fallback":
         return (engine.fallback, arm, None,
                 "fallback (your most common reply)", situation)
@@ -59,6 +67,10 @@ def main():
     ap.add_argument("--hybrid", action="store_true",
                     help="v2: rephrase retrieved replies with your char-LSTM "
                          "(needs: python train_lstm.py --all)")
+    ap.add_argument("--gen", action="store_true",
+                    help="true generation: brand-new replies from your seq2seq "
+                         "model compete as the 'gen' bandit arm "
+                         "(needs: python seq2seq.py train --all)")
     args = ap.parse_args()
 
     pairs_path = Path(args.pairs_dir) / f"{args.contact}.json"
@@ -76,8 +88,17 @@ def main():
         style = StyleModel.for_contact(args.contact)
         if style is None:
             raise SystemExit("no LSTM model -- run: python train_lstm.py --all")
-    print(f"loaded {len(engine)} pairs for {args.contact}"
-          + (" (hybrid: retrieval + LSTM)" if style else ""))
+    gen = None
+    if args.gen:
+        from seq2seq import Seq2SeqModel
+        gen = Seq2SeqModel.for_contact(args.contact)
+        if gen is None:
+            raise SystemExit("no seq2seq model -- run: python seq2seq.py train --all")
+    modes = "".join([
+        " (hybrid: retrieval + LSTM)" if style else "",
+        " (gen: true generation as bandit arm)" if gen else "",
+    ])
+    print(f"loaded {len(engine)} pairs for {args.contact}{modes}")
     print("commands: [Enter] approve as-is | type your edit | r reject | q quit\n")
 
     while True:
@@ -91,7 +112,7 @@ def main():
             continue
 
         draft, arm, _, src, situation = make_draft(engine, bandit,
-                                                       incoming, style)
+                                                       incoming, style, gen)
 
         flag = ""
         if human_only(situation):

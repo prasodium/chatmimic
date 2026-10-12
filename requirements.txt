@@ -1,3 +1,4 @@
 # v1 (retrieval + bandit + agent + autosend): standard library only.
-# v2 (train_lstm.py, generate.py, agent.py --hybrid): CPU PyTorch.
+# v2 (train_lstm.py, generate.py, seq2seq.py, agent.py --hybrid/--gen): CPU PyTorch.
+# Install with: pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch

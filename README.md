@@ -489,12 +489,70 @@ the same situation classifies as something the bot *can* handle.
 
 ---
 
+## True generation (seq2seq)
+
+Retrieval copies your old replies. The char-LSTM only rephrases them.
+`seq2seq.py` is the first component that **writes brand-new replies**:
+an encoder-decoder that *reads* the incoming message and *writes* a
+reply, word by word — trained from scratch on your
+(incoming → reply) pairs. No pretrained weights, ever.
+
+### Architecture
+
+```
+their message ──► [encoder: embed(128) → LSTM(256)×2] ──► context (h, c)
+                                                              │
+                                                              ▼
+                                              [decoder: embed(128) → LSTM(256)×2
+                                               seeded with context → softmax]
+                                                              │
+                                                              ▼
+                                              your new reply, word by word
+```
+
+- **Word-level** (~8k vocab + `<pad>/<unk>/<bos>/<eos>`): words carry
+  meaning better than characters for conditional relevance.
+- **~4M params**, CPU-trainable. Teacher forcing + cross-entropy + Adam.
+- **Per-contact** when history allows (≥ 500 pairs), else the global
+  `_all` model — same fallback pattern as the style model.
+
+```
+python seq2seq.py train --all                       # global + per-contact
+python seq2seq.py train --contact "Aarav Sharma"
+python seq2seq.py gen --contact "Aarav Sharma" --incoming "are we still on?"
+```
+
+Checkpoints → `models/seq2seq_<contact>.pt` (gitignored, never published).
+
+### How it joins the loop
+
+`agent.py --gen` adds the generated reply as a **`gen` bandit arm**,
+competing with rank0/1/2 every draft. The RL loop then learns *per
+situation* whether **you** prefer generated or retrieved replies —
+verified: after 40 approvals of `gen`, the bandit picks it outright
+(Q = 1.0). `autosend.py --gen` carries it into v3: the gate skips the
+similarity check for `gen` (there is none) and decides purely on
+learned bandit Q — while `emotional` / `unknown` stay human-only
+regardless.
+
+### Honest limits
+
+Trained on a few thousand casual chat pairs, seq2seq is fluent and
+stylistically yours, but often generic ("haha yeah") on unfamiliar
+inputs — and occasionally irrelevant. That is the data ceiling, not a
+bug: novelty is solved here, deep understanding is not (see
+[Honest limits](#honest-limits)). The bandit, the gate, and you are
+the safety net — which is exactly why generation ships as one arm
+among many, not as the whole bot.
+
+---
+
 ## The plan
 
 | Version | Goal | Deliverables | Status |
 |---|---|---|---|
 | **v1** | Prove the loop: your chats → drafts that sound like you → RL from your feedback | `parse_instagram.py`, `retrieval.py`, `bandit.py`, `agent.py`, `simulate.py`, `check_privacy.py` | ✅ done & verified |
-| **v2** | Add the LSTM style layer; hybrid retrieval+LSTM generation | `train_lstm.py`, `generate.py`, per-contact `models/*.pt` | ✅ built (`agent.py --hybrid`) |
+| **v2** | Add the LSTM style layer; hybrid retrieval+LSTM generation | `train_lstm.py`, `generate.py`, `seq2seq.py`, per-contact `models/*.pt` | ✅ built (`agent.py --hybrid`) |
 | **v3** | Careful auto-send for whitelisted contacts | `autosend.py`: send gate, whitelist, kill switch, send log, review queue | ✅ built |
 
 `simulate.py` is the standing regression test: synthetic corpus →
@@ -621,6 +679,7 @@ chatmimic/
 ├── agent.py              ← Stage 4: draft-approval CLI loop (--hybrid for v2)
 ├── train_lstm.py         ← Stage 5 (v2): char-LSTM trainer
 ├── generate.py           ← Stage 5 (v2): hybrid retrieval + LSTM rephrase
+├── seq2seq.py            ← true generation: conditional encoder-decoder
 ├── autosend.py           ← Stage 6 (v3): gated auto-send, kill switch, review
 ├── learn.py              ← the day-by-day loop: teach it your manual answers
 ├── check_privacy.py      ← pre-push privacy guard

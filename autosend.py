@@ -120,12 +120,14 @@ def gate(p: Paths, cfg: dict, contact: str, arm: str, sim, bandit: Bandit,
         return False, "quiet hours"
     if sent_today(p, contact, now) >= cfg["max_per_day"]:
         return False, "daily rate limit reached"
-    if arm == "fallback" or sim is None:
+    if arm == "fallback" or (sim is None and arm != "gen"):
         return False, "fallback reply is never auto-sent"
     pol = POLICY.get(situation, POLICY["chat"])
     if pol["autosend"] is False:
         return False, f"situation '{situation}' is human-only ({pol['note']})"
-    if sim < cfg["min_similarity"]:
+    # "gen" has no retrieval similarity -- its quality signal is the
+    # learned bandit Q, checked below like every other arm.
+    if arm != "gen" and sim < cfg["min_similarity"]:
         return False, f"similarity {sim:.2f} < {cfg['min_similarity']}"
     if bandit.n[arm] < cfg["min_n"]:
         return False, f"only {bandit.n[arm]} feedback rounds on {arm} (< {cfg['min_n']})"
@@ -141,13 +143,14 @@ def deliver_to_outbox(p: Paths, contact: str, text: str):
 
 
 def process(p: Paths, contact: str, incoming: str, engine, bandit, style=None,
-            send=deliver_to_outbox, now: datetime | None = None) -> str:
+            gen=None, send=deliver_to_outbox,
+            now: datetime | None = None) -> str:
     """Handle one incoming message. Returns 'sent' or 'queued'."""
     cfg = load_config(p)
     # No exploration when real messages are on the line.
     bandit.epsilon = 0.0
     draft, arm, sim, label, situation = make_draft(engine, bandit, incoming,
-                                                  style)
+                                                  style, gen)
     ok, reason = gate(p, cfg, contact, arm, sim, bandit, situation, now)
     rec = {"ts": (now or now_utc()).isoformat(), "contact": contact,
            "incoming": incoming, "draft": draft, "arm": arm,
@@ -207,6 +210,9 @@ def main():
         if name == "run":
             sp.add_argument("--incoming-file")
             sp.add_argument("--hybrid", action="store_true")
+            sp.add_argument("--gen", action="store_true",
+                            help="true generation as 'gen' bandit arm "
+                                 "(needs: python seq2seq.py train --all)")
     args = ap.parse_args()
 
     p = Paths()
@@ -247,12 +253,19 @@ def main():
         if args.hybrid:
             from generate import StyleModel
             style = StyleModel.for_contact(args.contact)
+        gen = None
+        if args.gen:
+            from seq2seq import Seq2SeqModel
+            gen = Seq2SeqModel.for_contact(args.contact)
+            if gen is None:
+                raise SystemExit("no seq2seq model -- run: python seq2seq.py train --all")
         src = open(args.incoming_file, encoding="utf-8") if args.incoming_file \
             else sys.stdin
         for line in src:
             line = line.strip()
             if line:
-                result = process(p, args.contact, line, engine, bandit, style)
+                result = process(p, args.contact, line, engine, bandit,
+                                 style, gen)
                 print(f"[{result}] {line}")
 
 

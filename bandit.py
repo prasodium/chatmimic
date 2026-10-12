@@ -3,8 +3,9 @@
 Contextual bandit -- the 'reinforcement' in the system.
 
 Arms = which candidate to send: rank0 / rank1 / rank2 (the top TF-IDF
-candidates) or the generic fallback. Reward comes from YOUR feedback
-in the draft loop:
+candidates), gen (a brand-new reply from the seq2seq generator, when
+enabled via agent.py --gen), or the generic fallback. Reward comes from
+YOUR feedback in the draft loop:
 
     approve as-is  -> +1.0
     edit then send -> +0.4
@@ -24,7 +25,7 @@ import json
 import random
 from pathlib import Path
 
-ARMS = ["rank0", "rank1", "rank2", "fallback"]
+ARMS = ["rank0", "rank1", "rank2", "gen", "fallback"]
 REWARDS = {"approve": 1.0, "edit": 0.4, "reject": -1.0}
 DEFAULT_SITUATION = "chat"
 
@@ -63,9 +64,13 @@ class Bandit:
         self.q = tbl["q"]
         self.n = tbl["n"]
 
-    def select(self, n_candidates: int) -> str:
-        """Pick an arm. n_candidates = how many retrieval candidates exist."""
-        valid = [f"rank{i}" for i in range(min(n_candidates, 3))] + ["fallback"]
+    def select(self, n_candidates: int, has_gen: bool = False) -> str:
+        """Pick an arm. n_candidates = how many retrieval candidates exist;
+        has_gen = whether a freshly generated reply is available."""
+        valid = [f"rank{i}" for i in range(min(n_candidates, 3))]
+        if has_gen:
+            valid.append("gen")
+        valid.append("fallback")
         if self.rng.random() < self.epsilon:
             return self.rng.choice(valid)  # explore
         # exploit: highest Q, random tiebreak so fresh arms get a chance
