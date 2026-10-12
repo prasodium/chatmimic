@@ -24,12 +24,35 @@ ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "feedback_log.jsonl"
 
 
+def make_draft(engine, bandit, incoming, style=None):
+    """Retrieve -> bandit picks -> (optional) LSTM rephrase.
+
+    Returns (draft, arm, similarity, label). similarity is None for the
+    fallback arm. `style` is a generate.StyleModel or None (v1 behaviour).
+    """
+    cands = engine.suggest(incoming, k=3)
+    arm = bandit.select(len(cands))
+    if arm == "fallback":
+        return engine.fallback, arm, None, "fallback (your most common reply)"
+    draft, score, _ = cands[int(arm[4:])]
+    label = f"{arm} (similarity {score:.2f})"
+    if style is not None:
+        from generate import rephrase
+        new = rephrase(style, draft)
+        if new != draft:
+            draft, label = new, label + " + lstm"
+    return draft, arm, score, label
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--contact", required=True,
                     help="Contact name (matches data/pairs/<name>.json)")
     ap.add_argument("--pairs-dir", default=str(ROOT / "data" / "pairs"))
     ap.add_argument("--state-dir", default=str(ROOT / "data" / "bandit"))
+    ap.add_argument("--hybrid", action="store_true",
+                    help="v2: rephrase retrieved replies with your char-LSTM "
+                         "(needs: python train_lstm.py --all)")
     args = ap.parse_args()
 
     pairs_path = Path(args.pairs_dir) / f"{args.contact}.json"
@@ -41,7 +64,14 @@ def main():
 
     engine = ReplyEngine(pairs_path)
     bandit = Bandit(Path(args.state_dir) / f"{args.contact}.json")
-    print(f"loaded {len(engine)} pairs for {args.contact}")
+    style = None
+    if args.hybrid:
+        from generate import StyleModel
+        style = StyleModel.for_contact(args.contact)
+        if style is None:
+            raise SystemExit("no LSTM model -- run: python train_lstm.py --all")
+    print(f"loaded {len(engine)} pairs for {args.contact}"
+          + (" (hybrid: retrieval + LSTM)" if style else ""))
     print("commands: [Enter] approve as-is | type your edit | r reject | q quit\n")
 
     while True:
@@ -54,13 +84,7 @@ def main():
         if not incoming:
             continue
 
-        cands = engine.suggest(incoming, k=3)
-        arm = bandit.select(len(cands))
-        if arm == "fallback":
-            draft, src = engine.fallback, "fallback (your most common reply)"
-        else:
-            draft, score, _ = cands[int(arm[4:])]
-            src = f"{arm} (similarity {score:.2f})"
+        draft, arm, _, src = make_draft(engine, bandit, incoming, style)
 
         print(f"\ndraft [{src}]: {draft}")
         try:

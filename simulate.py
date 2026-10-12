@@ -80,6 +80,65 @@ def main():
         "preferred arm was not selected most"
     print("\nOK: bandit converged on the user's preferred reply rank.")
 
+    test_autosend(engine)
+    test_lstm()
+
+
+def test_autosend(engine):
+    """v3: the gate must hold everything back until confident + opted in."""
+    import tempfile
+    from datetime import datetime
+    import autosend as A
+
+    noon = datetime.now().astimezone().replace(hour=12, minute=0)
+    night = noon.replace(hour=2)
+    with tempfile.TemporaryDirectory() as d:
+        p = A.Paths(Path(d))
+        bandit = Bandit(p.bandit / "demo.json", epsilon=0.0)
+        outbox = lambda *_: None
+        run = lambda now=noon: A.process(
+            p, "demo", "want to grab lunch tomorrow?", engine, bandit, send=outbox, now=now)
+        trained = lambda: [bandit.update("rank0", 1.0) for _ in range(12)]
+
+        assert run() == "queued", "must be draft-only before opt-in"
+        A.save_config(p, {**A.DEFAULTS, "contacts": ["demo"]})
+        assert run() == "queued", "untrained bandit must not auto-send"
+        trained()
+        assert run() == "sent", "confident + whitelisted should send"
+        assert run(night) == "queued", "quiet hours must hold"
+        p.kill.write_text("x")
+        assert run() == "queued", "kill switch must hold"
+        p.kill.unlink()
+        A.save_config(p, {**A.DEFAULTS, "contacts": ["demo"], "max_per_day": 1})
+        assert run() == "queued", "daily rate limit must hold"
+        assert len(A.read_jsonl(p.send_log)) == 1
+    print("OK: send gate holds on opt-in, confidence, quiet hours, "
+          "kill switch, rate limit.")
+
+
+def test_lstm():
+    """v2: LSTM trains and the hybrid never drifts from the retrieved reply."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        print("SKIP: v2 LSTM test (pip install torch to enable)")
+        return
+    from generate import StyleModel, rephrase
+    from train_lstm import train_model
+
+    texts = [json.loads(PAIRS.read_text())[i]["reply"] for i in range(200)]
+    ckpt = train_model(texts, epochs=15, verbose=False)
+    assert ckpt["val_loss"] < 1.5, f"LSTM failed to learn: {ckpt['val_loss']:.2f}"
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        torch.save(ckpt, Path(d) / "demo.pt")
+        style = StyleModel(Path(d) / "demo.pt")
+    sample = style.generate("yeah", 0.5)
+    print(f"LSTM sample: {sample!r}  (val loss {ckpt['val_loss']:.2f})")
+    out = rephrase(style, "yeah sure, what time?", seed=0)
+    assert {"yeah", "sure", "what", "time"} & set(out.lower().replace(",", " ").replace("?", "").split()), out
+    print(f"OK: LSTM learned your voice; hybrid rephrase -> {out!r}")
+
 
 if __name__ == "__main__":
     main()

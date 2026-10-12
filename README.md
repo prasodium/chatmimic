@@ -148,13 +148,14 @@ Everything in this repo follows the owner's standing requirements.
 | Version | Goal | Deliverables | Status |
 |---|---|---|---|
 | **v1** | Prove the loop: your chats → drafts that sound like you → RL from your feedback | `parse_instagram.py`, `retrieval.py`, `bandit.py`, `agent.py`, `simulate.py`, `check_privacy.py` | ✅ done & verified |
-| **v2** | Add the LSTM style layer; hybrid retrieval+LSTM generation | `train_lstm.py`, `generate.py`, per-contact `models/*.pt` | planned |
-| **v3** | Careful auto-send for whitelisted contacts | send gate, whitelist, kill switch, send log, review queue | planned |
+| **v2** | Add the LSTM style layer; hybrid retrieval+LSTM generation | `train_lstm.py`, `generate.py`, per-contact `models/*.pt` | ✅ built (`agent.py --hybrid`) |
+| **v3** | Careful auto-send for whitelisted contacts | `autosend.py`: send gate, whitelist, kill switch, send log, review queue | ✅ built |
 | **v4** | (Optional) Qwen+LoRA if v2 understanding plateaus | LoRA fine-tune script | only if needed |
 
 `simulate.py` is the standing regression test: synthetic corpus →
 retrieval sanity checks → 300 simulated feedback rounds proving the
-bandit converges on the user's taste. Run it after any change:
+bandit converges on the user's taste → send-gate checks → LSTM training
+(skipped if torch isn't installed). Run it after any change:
 `python simulate.py`.
 
 ---
@@ -226,9 +227,26 @@ Everything runs locally — no server, no API, no network needed after setup.
    in `data/bandit/<contact>.json` and survives restarts.
 5. `git status` will show only code changes. Your data simply doesn't
    exist as far as git is concerned.
-6. v2 LSTM: `pip install torch --cpu`, then the training script reads
-   from `data/` and writes weights to `models/` (also gitignored). The
-   one network call in the whole project is the `pip install`.
+6. v2 LSTM: `pip install torch` (CPU build is fine), then:
+   ```bash
+   python train_lstm.py --all            # per-contact models + generic _all
+   python agent.py --contact "Aarav Sharma" --hybrid
+   python generate.py --contact "Aarav Sharma" --seed "yeah" -n 5
+   ```
+   Weights are written to `models/` (gitignored). The one network call in
+   the whole project is the `pip install`.
+7. v3 gated auto-send (off by default, per-contact opt-in):
+   ```bash
+   python autosend.py enable "Aarav Sharma"
+   python autosend.py status
+   python autosend.py run --contact "Aarav Sharma" --incoming-file new.txt
+   python autosend.py review --contact "Aarav Sharma"   # held drafts
+   python autosend.py kill                              # stop everything
+   ```
+   Confident drafts go to `data/outbox.jsonl`; everything else waits in
+   `data/review_queue.jsonl`. Instagram has no official personal-DM API,
+   so nothing is delivered over the network: the outbox is the hand-off
+   to whatever local tool you choose to send with.
 
 ---
 
@@ -254,7 +272,10 @@ chatmimic/
 ├── parse_instagram.py    ← Stage 1: export → per-contact pairs
 ├── retrieval.py          ← Stage 2: TF-IDF reply suggester (supervised)
 ├── bandit.py             ← Stage 3: epsilon-greedy bandit (reinforcement)
-├── agent.py              ← Stage 4: draft-approval CLI loop
+├── agent.py              ← Stage 4: draft-approval CLI loop (--hybrid for v2)
+├── train_lstm.py         ← Stage 5 (v2): char-LSTM trainer
+├── generate.py           ← Stage 5 (v2): hybrid retrieval + LSTM rephrase
+├── autosend.py           ← Stage 6 (v3): gated auto-send, kill switch, review
 ├── check_privacy.py      ← pre-push privacy guard
 ├── simulate.py           ← end-to-end verification on synthetic data
 ├── data/                 ← YOURS ONLY, gitignored (pairs, bandit state)
